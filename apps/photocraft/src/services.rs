@@ -80,24 +80,18 @@ fn show_file_dialog(request: FileDialogRequest, parent: Option<&eframe::Frame>, 
         dialog = dialog.set_parent(parent);
     }
     let answer: Pin<Box<dyn Future<Output = Option<FileDialogAnswer>> + Send>> = match request {
-FileDialogRequest::Open { multiple, only, initial_dir, extensions } => {
-    if let Some(dir) = initial_dir {
-        dialog = dialog.set_directory(dir);
-    }
-    let dialog = match (only, extensions) {
-        (Some((name, exts)), _) => dialog.add_filter(name, exts),
-        (None, Some(exts)) => dialog.add_filter(
-            "Supported Files",
-            &open_filter_extensions(&exts.iter().map(String::as_str).collect::<Vec<_>>()),
-        ),
-        (None, None) => dialog
-            .add_filter("All Formats", &open_filter_extensions(OPEN_EXTS))
-            .add_filter("PhotoCraft", &open_filter_extensions(&["pcraft"]))
-            .add_filter("Paint.NET", &open_filter_extensions(&["pdn"])),
-    };
-    if multiple {
-        let picked = dialog.pick_files();
-
+        FileDialogRequest::Open { multiple, initial_dir, extensions } => {
+            if let Some(dir) = initial_dir {
+                dialog = dialog.set_directory(dir);
+            }
+            // A command-specific filter must not inherit the image formats used by File › Open.
+            let dialog = if let Some(exts) = extensions {
+                dialog.add_filter("Supported Files", &open_filter_extensions(&exts.iter().map(String::as_str).collect::<Vec<_>>()))
+            } else {
+                dialog
+                    .add_filter("All Formats", &open_filter_extensions(OPEN_EXTS))
+                    .add_filter("PhotoCraft", &open_filter_extensions(&["pcraft"]))
+                    .add_filter("Paint.NET", &open_filter_extensions(&["pdn"]))
             };
             if multiple {
                 let picked = dialog.pick_files();

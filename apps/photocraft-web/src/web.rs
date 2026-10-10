@@ -351,15 +351,11 @@ fn services(inbox: Inbox) -> Services {
         })),
         file_dialog: Some(Box::new(|request, _parent, reply| match request {
             // The browser's file picker hands over the file's contents, not a path.
-FileDialogRequest::Open { only, extensions, .. } => wasm_bindgen_futures::spawn_local(async move {
-    let dialog = match (only, extensions) {
-        (Some((name, exts)), _) => rfd::AsyncFileDialog::new().add_filter(name, exts),
-        (None, Some(exts)) => rfd::AsyncFileDialog::new().add_filter("Supported Files", &exts),
-        (None, None) => rfd::AsyncFileDialog::new().add_filter("All Formats", OPEN_EXTS),
-    };
-    let picked = dialog.pick_file().await;
-    let answer = match picked {
-
+            FileDialogRequest::Open { extensions, .. } => wasm_bindgen_futures::spawn_local(async move {
+                let dialog = if let Some(exts) = extensions {
+                    rfd::AsyncFileDialog::new().add_filter("Supported Files", &exts)
+                } else {
+                    rfd::AsyncFileDialog::new().add_filter("All Formats", OPEN_EXTS)
                 };
                 let picked = dialog.pick_file().await;
                 let answer = match picked {

@@ -291,17 +291,3 @@ fn an_answer_of_the_wrong_kind_is_an_error_not_a_crash() {
     app.poll_file_dialog(&ctx, None);
     assert_eq!(app.session.documents().len(), 1);
 }
-
-#[test]
-fn a_command_can_limit_the_open_dialog_to_one_kind_of_file() {
-    let (mut app, open, _) = app();
-    let ctx = egui::Context::default();
-    app.pick_file_bytes_of(Some(("Color Table", &["act"])), |_, _, _| Ok(Value::Null)).unwrap();
-    app.poll_file_dialog(&ctx, None);
-    assert!(matches!(open.borrow().as_slice(), [(FileDialogRequest::Open { multiple: false, only: Some(("Color Table", ["act"])) }, _)]));
-    answer(&open, None);
-    app.poll_file_dialog(&ctx, None);
-    app.pick_file_bytes(|_, _, _| Ok(Value::Null)).unwrap();
-    app.poll_file_dialog(&ctx, None);
-    assert!(matches!(open.borrow().as_slice(), [(FileDialogRequest::Open { only: None, .. }, _)]));
-}

@@ -289,7 +289,7 @@ pub fn body(app: &mut PhotocraftApp, ui: &mut egui::Ui, id: u64, f: &mut Map<Str
     };
     match picked {
         Some("load") => {
-            let r = app.pick_file_bytes_of(Some(("Color Table", &["act"])), move |app, name, bytes| load_into(app, id, &name, &bytes));
+            let r = app.pick_file_bytes_filtered(&["act"], move |app, name, bytes| load_into(app, id, &name, &bytes));
             status(app, r);
         }
         Some(_) => {
