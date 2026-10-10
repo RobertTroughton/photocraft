@@ -25,8 +25,13 @@ use crate::file_open::display_name;
 pub enum FileDialogRequest {
     /// Files to read: several for File › Open, one for a command that reads a file (Place,
     /// scripts, notes, presets). `only` limits the dialog to one kind of file (a filter name and
-    /// its extensions); `None` offers the image formats.
-    Open { multiple: bool, only: Option<FileKind> },
+    /// its extensions); `None` offers the image formats. Starts in `initial_dir` (the last-used folder).
+    Open {
+        multiple: bool,
+        only: Option<FileKind>,
+        initial_dir: Option<String>,
+        extensions: Option<Vec<String>>,
+    },
     /// Where to write, starting from `suggested` (a file name, or the document's own path).
     Save { suggested: String },
 }
@@ -108,12 +113,34 @@ impl PhotocraftApp {
         Ok(json!({ "fileDialog": kind }))
     }
 
-    /// Ask where to save: `then` gets the chosen path.
+    /// Ask where to save: `then` gets the chosen path, with a lowercase extension when
+    /// Preferences ▸ File Handling › Lowercase Extension is on (its default).
     pub(crate) fn pick_save(&mut self, suggested: &str, then: impl FnOnce(&mut Self, String) -> Result<Value, String> + 'static) -> Result<Value, String> {
-        self.ask_file(FileDialogRequest::Save { suggested: suggested.to_string() }, move |app, answer| match answer {
-            FileDialogAnswer::SaveTo(path) => then(app, path),
+        let mut suggested = std::path::PathBuf::from(suggested);
+        // Export dialogs usually provide only a file name. Start beside the source document,
+        // while preserving a caller's explicit directory and the untitled-document fallback.
+        if suggested.parent().is_some_and(|p| p.as_os_str().is_empty())
+            && let Some(dir) = self.session.active().and_then(|d| d.path.as_deref()).and_then(|p| std::path::Path::new(p).parent())
+        {
+            suggested = dir.join(suggested);
+        }
+        self.ask_file(FileDialogRequest::Save { suggested: suggested.to_string_lossy().into_owned() }, move |app, answer| match answer {
+            FileDialogAnswer::SaveTo(path) => then(app, Self::lowercased_extension(app, path)),
             _ => Err(UNEXPECTED.into()),
         })
+    }
+
+    /// `X.PSD` → `X.psd`, only the extension: the stem and the folders keep the user's spelling.
+    fn lowercased_extension(app: &PhotocraftApp, path: String) -> String {
+        if !app.session.prefs().file_handling.lowercase_extension {
+            return path;
+        }
+        let p = std::path::Path::new(&path);
+        let Some(ext) = p.extension().and_then(|e| e.to_str()) else { return path };
+        if ext.bytes().all(|b| !b.is_ascii_uppercase()) {
+            return path;
+        }
+        p.with_extension(ext.to_ascii_lowercase()).to_string_lossy().into_owned()
     }
 
     /// Ask for a file a command reads (a script, notes, a placed image, presets): `then` gets its
@@ -129,7 +156,32 @@ impl PhotocraftApp {
         only: Option<FileKind>,
         then: impl FnOnce(&mut Self, String, Vec<u8>) -> Result<Value, String> + 'static,
     ) -> Result<Value, String> {
-        self.ask_file(FileDialogRequest::Open { multiple: false, only }, move |app, answer| {
+        let initial_dir = last_used_dir(&self.ui.recent_files);
+        self.ask_file(
+            FileDialogRequest::Open { multiple: false, only, initial_dir, extensions: None },
+            move |app, answer| {
+                let (name, bytes) = read_picked(answer)?;
+                then(app, name, bytes)
+            },
+        )
+    }
+
+    /// Same asynchronous picker, with a platform-native extension filter (desktop and web).
+    pub(crate) fn pick_file_bytes_filtered(
+        &mut self,
+        extensions: &[&str],
+        then: impl FnOnce(&mut Self, String, Vec<u8>) -> Result<Value, String> + 'static,
+    ) -> Result<Value, String> {
+        let initial_dir = last_used_dir(&self.ui.recent_files);
+        let extensions = (!extensions.is_empty()).then(|| extensions.iter().map(|s| (*s).to_string()).collect());
+        self.ask_file(
+            FileDialogRequest::Open { multiple: false, only: None, initial_dir, extensions },
+            move |app, answer| {
+                let (name, bytes) = read_picked(answer)?;
+                then(app, name, bytes)
+            },
+        )
+    }
             let (name, bytes) = read_picked(answer)?;
             then(app, name, bytes)
         })
@@ -137,7 +189,13 @@ impl PhotocraftApp {
 
     /// File › Open: opens every chosen file, reporting each failure (see [`Self::open_paths`]).
     pub fn open_dialog_file(&mut self) -> Result<Value, String> {
-        self.ask_file(FileDialogRequest::Open { multiple: true, only: None }, |app, answer| {
+        let initial_dir = last_used_dir(&self.ui.recent_files);
+        self.ask_file(
+            FileDialogRequest::Open { multiple: true, only: None, initial_dir, extensions: None },
+            |app, answer| {
+                match answer {
+                    FileDialogAnswer::Paths(paths) => {
+                        app.open_paths(&paths);
             match answer {
                 FileDialogAnswer::Paths(paths) => {
                     app.open_paths(&paths);
@@ -173,6 +231,18 @@ impl PhotocraftApp {
         Ok(())
     }
 
+    /// Complete a deferred operation on its requesting document without stealing the selected
+    /// tab. Restore by ID as script events can close or reorder documents during a save.
+    pub(crate) fn with_document<T>(&mut self, id: DocId, run: impl FnOnce(&mut Self) -> Result<T, String>) -> Result<T, String> {
+        let active = self.session.active().map(|d| d.doc.id);
+        self.refocus(id)?;
+        let result = run(self);
+        if let Some(active) = active {
+            let _ = self.refocus(active);
+        }
+        result
+    }
+
     /// The active document's id, for [`Self::refocus`].
     pub(crate) fn active_doc_id(&self) -> Result<DocId, String> {
         Ok(self.session.active().ok_or("no document")?.doc.id)
@@ -203,6 +273,12 @@ impl PhotocraftApp {
             self.ui.status_error = true;
         }
     }
+}
+
+/// The folder an open dialog starts in: the directory of the most recent file (UI-217-3).
+fn last_used_dir(recent: &[String]) -> Option<String> {
+    let dir = std::path::Path::new(recent.first()?).parent()?;
+    (!dir.as_os_str().is_empty()).then(|| dir.to_string_lossy().into_owned())
 }
 
 /// The name and bytes of the single file an open dialog answered with.
