@@ -161,6 +161,61 @@ fn color_table_presets_and_entries() {
     assert!(s.execute("image.mode.colorTable", json!({"entries": {"999": "#000000"}})).is_err());
 }
 
+fn temp_path(name: &str) -> String {
+    let dir = std::env::temp_dir().join(format!("photocraft-palette-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.join(name).to_string_lossy().into_owned()
+}
+
+#[test]
+fn custom_palette_restricts_the_image_to_the_given_colours() {
+    let mut s = session(16, 16, 8, "rgb");
+    let r = s.execute("image.mode.indexedColor", json!({"palette": "custom", "table": ["#ff0000", "#00ff00", "#0000ff"], "dither": "none"})).unwrap();
+    assert_eq!(r["colors"], 3);
+    assert_eq!(doc(&s).color_table.as_ref().unwrap().colors, vec![[255, 0, 0], [0, 255, 0], [0, 0, 255]]);
+    assert!(colours(doc(&s)).is_subset(&[[255, 0, 0], [0, 255, 0], [0, 0, 255]].into_iter().collect()));
+    // Previous reuses it on the next conversion.
+    let mut s2 = session(16, 16, 8, "rgb");
+    assert!(s2.execute("image.mode.indexedColor", json!({"palette": "previous"})).is_err());
+    s2.custom_palette = s.custom_palette.clone();
+    s2.execute("image.mode.indexedColor", json!({"palette": "previous", "dither": "none"})).unwrap();
+    assert_eq!(doc(&s2).color_table, doc(&s).color_table);
+    for bad in [
+        json!({"palette": "custom"}),
+        json!({"palette": "custom", "table": []}),
+        json!({"palette": "custom", "table": ["nope"]}),
+        json!({"palette": "custom", "load": "/no/such.act"}),
+    ] {
+        assert!(session(4, 4, 8, "rgb").execute("image.mode.indexedColor", bad).is_err());
+    }
+}
+
+#[test]
+fn color_tables_save_and_load_as_act_aco_and_ase() {
+    let mut s = session(16, 16, 8, "rgb");
+    s.execute("image.mode.indexedColor", json!({"palette": "uniform", "colors": 8, "dither": "none", "forced": "none"})).unwrap();
+    let table = doc(&s).color_table.clone().unwrap();
+    for ext in ["act", "aco", "ase"] {
+        let path = temp_path(&format!("table.{ext}"));
+        s.execute("image.mode.colorTable", json!({"save": path})).unwrap();
+        let mut other = session(16, 16, 8, "rgb");
+        other.execute("image.mode.indexedColor", json!({"palette": "custom", "load": path, "dither": "none"})).unwrap();
+        assert_eq!(doc(&other).color_table.as_ref().unwrap().colors, table.colors, "{ext}");
+    }
+    // Loading into an existing table replaces the entries and carries the file's transparent index.
+    let path = temp_path("transparent.act");
+    std::fs::write(&path, photocraft_psd::act::write(&[[0, 0, 0], [255, 255, 255]], Some(1)).unwrap()).unwrap();
+    s.execute("image.mode.colorTable", json!({"load": path})).unwrap();
+    let t = doc(&s).color_table.as_ref().unwrap();
+    assert_eq!((t.colors.len(), t.transparent), (2, Some(1)));
+    assert_eq!(s.custom_palette.as_ref().map(Vec::len), Some(2));
+    // Unreadable files and unknown extensions fail without touching the document.
+    let junk = temp_path("junk.act");
+    std::fs::write(&junk, [1, 2, 3]).unwrap();
+    assert!(s.execute("image.mode.colorTable", json!({"load": junk})).is_err());
+    assert!(s.execute("image.mode.colorTable", json!({"save": temp_path("table.png")})).is_err());
+}
+
 #[test]
 fn bitmap_methods_need_grayscale() {
     let mut s = session(32, 32, 16, "rgb");

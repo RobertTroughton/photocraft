@@ -24,11 +24,15 @@ use crate::file_open::display_name;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FileDialogRequest {
     /// Files to read: several for File › Open, one for a command that reads a file (Place,
-    /// scripts, notes, presets).
-    Open { multiple: bool },
+    /// scripts, notes, presets). `only` limits the dialog to one kind of file (a filter name and
+    /// its extensions); `None` offers the image formats.
+    Open { multiple: bool, only: Option<FileKind> },
     /// Where to write, starting from `suggested` (a file name, or the document's own path).
     Save { suggested: String },
 }
+
+/// A kind of file an Open dialog is limited to: the filter's name and its extensions.
+pub type FileKind = (&'static str, &'static [&'static str]);
 
 /// The user's choice (a cancelled dialog answers `None`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -116,7 +120,16 @@ impl PhotocraftApp {
     /// name (the full path on the desktop) and bytes. A file that can't be read fails with
     /// "<file name>: <why>".
     pub(crate) fn pick_file_bytes(&mut self, then: impl FnOnce(&mut Self, String, Vec<u8>) -> Result<Value, String> + 'static) -> Result<Value, String> {
-        self.ask_file(FileDialogRequest::Open { multiple: false }, move |app, answer| {
+        self.pick_file_bytes_of(None, then)
+    }
+
+    /// [`Self::pick_file_bytes`] limited to one kind of file.
+    pub(crate) fn pick_file_bytes_of(
+        &mut self,
+        only: Option<FileKind>,
+        then: impl FnOnce(&mut Self, String, Vec<u8>) -> Result<Value, String> + 'static,
+    ) -> Result<Value, String> {
+        self.ask_file(FileDialogRequest::Open { multiple: false, only }, move |app, answer| {
             let (name, bytes) = read_picked(answer)?;
             then(app, name, bytes)
         })
@@ -124,7 +137,7 @@ impl PhotocraftApp {
 
     /// File › Open: opens every chosen file, reporting each failure (see [`Self::open_paths`]).
     pub fn open_dialog_file(&mut self) -> Result<Value, String> {
-        self.ask_file(FileDialogRequest::Open { multiple: true }, |app, answer| {
+        self.ask_file(FileDialogRequest::Open { multiple: true, only: None }, |app, answer| {
             match answer {
                 FileDialogAnswer::Paths(paths) => {
                     app.open_paths(&paths);

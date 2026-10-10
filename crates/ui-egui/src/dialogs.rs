@@ -177,6 +177,7 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
                         }
                     }
                 }
+                DialogKind::Command if crate::color_table_ui::owns(&fields) => crate::color_table_ui::body(app, ui, d.id, &mut fields),
                 DialogKind::Command if crate::fill_ui::owns(&fields) => crate::fill_ui::body(app, ui, &mut fields),
                 DialogKind::Command if crate::rasterize_prompt::owns(&fields) => crate::rasterize_prompt::body(ui, &fields),
                 DialogKind::Command if crate::variables_ui::owns(&fields) => crate::variables_ui::body(app, ui, &mut fields),
@@ -195,7 +196,8 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
                     if fields.get("__command").and_then(Value::as_str) == Some("edit.colorSettings") {
                         fields.insert("__note".into(), Value::String(crate::monitor_status::note(app)));
                     }
-                    crate::filter_dialog::body(ui, &mut fields)
+                    crate::filter_dialog::body(ui, &mut fields);
+                    crate::color_table_ui::take_request(app, d.id, &mut fields);
                 }
                 DialogKind::Command if fields.contains_key("__form") => crate::view_cmds::form_body(ui, &mut fields),
                 DialogKind::Command => {}
@@ -286,7 +288,9 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
                 let _ = confirm(app, d.id);
             }
             Some(false) => {
-                app.ui.close_dialog(d.id);
+                if let Some(closed) = app.ui.close_dialog(d.id) {
+                    crate::color_table_ui::cancelled(app, &closed.fields);
+                }
                 app.filter_preview = None;
                 app.color_range = None;
             }
@@ -341,6 +345,7 @@ pub fn confirm(app: &mut PhotocraftApp, id: u64) -> Result<Value, String> {
             }
             r
         }
+        DialogKind::Command if crate::color_table_ui::owns(&d.fields) => crate::color_table_ui::confirm(app, &d.fields),
         DialogKind::Command if crate::fill_ui::owns(&d.fields) => crate::fill_ui::confirm(app, &d.fields),
         DialogKind::Command if crate::rasterize_prompt::owns(&d.fields) => crate::rasterize_prompt::confirm(app, &d.fields),
         DialogKind::Command if crate::variables_ui::owns(&d.fields) => crate::variables_ui::confirm(app, &d.fields),

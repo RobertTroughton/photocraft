@@ -179,31 +179,88 @@ fn parse_dither(s: &str) -> Option<Dither> {
     })
 }
 
+/// A palette given as `["#rrggbb" | [r, g, b], …]`, 1 to 256 entries.
+fn parse_colors(cmd: &str, v: &Value, what: &str) -> Result<Vec<[u8; 3]>> {
+    let c: Option<Vec<[u8; 3]>> = v.as_array().and_then(|a| a.iter().map(parse_color).collect());
+    match c {
+        Some(c) if (1..=256).contains(&c.len()) => Ok(c),
+        Some(_) => Err(bad(cmd, format!("{what}: a palette has 1 to 256 entries"))),
+        None => Err(bad(cmd, format!("{what}: [\"#rrggbb\" | [r, g, b], …]"))),
+    }
+}
+
+/// The palette Indexed Color › Custom starts editing from: the last custom palette, else the
+/// document's own table, else a perceptual palette of the image.
+pub fn initial_palette(s: &Session, colors: usize) -> Vec<[u8; 3]> {
+    if let Some(p) = &s.custom_palette {
+        return p.clone();
+    }
+    let Some(d) = s.active() else { return quantize::web_palette() };
+    if let Some(t) = &d.doc.color_table {
+        return t.colors.clone();
+    }
+    let px = composite(&d.doc, true);
+    quantize::build_palette(&px, PaletteKind::Perceptual, colors, Forced::None).unwrap_or_else(|_| quantize::web_palette())
+}
+
+/// The palette of Indexed Color › Custom (`table` or `load`) or Previous (the last custom one).
+fn fixed_palette(s: &Session, cmd: &str, p: &Value, previous: bool) -> Result<Vec<[u8; 3]>> {
+    if previous {
+        return s.custom_palette.clone().ok_or_else(|| bad(cmd, "there is no previous custom palette"));
+    }
+    if let Some(t) = p.get("table") {
+        return parse_colors(cmd, t, "table");
+    }
+    match p.get("load").and_then(Value::as_str).filter(|l| !l.trim().is_empty()) {
+        Some(path) => Ok(crate::palette_file::load(s, cmd, path)?.colors),
+        None => Err(bad(cmd, "a custom palette needs `table` or `load` (an .act, .aco or .ase file)")),
+    }
+}
+
 fn indexed_color(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "image.mode.indexedColor";
-    let kind = PaletteKind::from_id(str_or(p, "palette", "selective"))
-        .ok_or_else(|| bad(CMD, "palette: exact|systemMac|systemWindows|web|uniform|perceptual|selective|adaptive"))?;
+    let palette = str_or(p, "palette", "selective");
+    let custom = matches!(palette, "custom" | "previous");
+    let kind = PaletteKind::from_id(palette);
+    if kind.is_none() && !custom {
+        return Err(bad(CMD, "palette: exact|systemMac|systemWindows|web|uniform|perceptual|selective|adaptive|custom|previous"));
+    }
     let forced = parse_forced(str_or(p, "forced", "blackWhite")).ok_or_else(|| bad(CMD, "forced: none|blackWhite|primaries|web"))?;
     let dither = parse_dither(str_or(p, "dither", "diffusion")).ok_or_else(|| bad(CMD, "dither: none|diffusion|pattern|noise"))?;
     let colors = num(p, "colors", 256.0).clamp(2.0, 256.0) as usize;
     let amount = num(p, "amount", 75.0).clamp(0.0, 100.0) / 100.0;
     let transparency = p.get("transparency").and_then(Value::as_bool).unwrap_or(true);
-    let (pal_len, transparent) = s.edit("Indexed Color", |doc, active| {
-        let mut px = composite(doc, !transparency);
-        let has_clear = transparency && px.iter().any(|q| q[3] < 0.5);
-        let mut pal = quantize::build_palette(&px, kind, if has_clear { colors.saturating_sub(1).max(2) } else { colors }, forced).map_err(|e| bad(CMD, e))?;
-        let transparent = if has_clear && pal.len() < 256 {
-            pal.push([255, 255, 255]);
-            Some(pal.len() - 1)
-        } else {
-            None
-        };
+    let fixed = if custom { Some(fixed_palette(s, CMD, p, palette == "previous")?) } else { None };
+    let doc = &s.active().ok_or(EngineError::NoDocument)?.doc;
+    let mut px = composite(doc, !transparency);
+    let has_clear = transparency && px.iter().any(|q| q[3] < 0.5);
+    let room = if has_clear { colors.saturating_sub(1).max(2) } else { colors };
+    let mut pal = match (fixed, kind) {
+        (Some(f), _) => f,
+        (None, Some(kind)) => quantize::build_palette(&px, kind, room, forced).map_err(|e| bad(CMD, e))?,
+        (None, None) => return Err(bad(CMD, "no palette")),
+    };
+    let chosen = pal.clone();
+    let transparent = if has_clear && pal.len() < 256 {
+        pal.push([255, 255, 255]);
+        Some(pal.len() - 1)
+    } else {
+        None
+    };
+    if let Some(path) = p.get("save").and_then(Value::as_str).filter(|v| !v.trim().is_empty()) {
+        crate::palette_file::save(CMD, path, &pal, transparent.map(|t| t as u8))?;
+    }
+    let pal_len = pal.len();
+    s.edit("Indexed Color", |doc, active| {
         let w = doc.size.width as usize;
         quantize::quantize(&mut px, w, &pal, dither, amount, transparent);
         single_layer(doc, active, ColorMode::Indexed, &px, if transparent.is_some() { "Index" } else { "Background" }, transparent.is_none());
-        doc.color_table = Some(ColorTable { colors: pal.clone(), transparent: transparent.map(|t| t as u8) });
-        Ok((pal.len(), transparent))
+        doc.color_table = Some(ColorTable { colors: pal, transparent: transparent.map(|t| t as u8) });
+        Ok(())
     })?;
+    if custom {
+        s.custom_palette = Some(chosen);
+    }
     Ok(json!({"colors": pal_len, "transparentIndex": transparent}))
 }
 
@@ -261,13 +318,15 @@ fn color_table(s: &mut Session, p: &Value) -> Result<Value> {
         "custom" => {}
         name => table.colors = preset_table(name).ok_or_else(|| bad(CMD, format!("unknown table `{name}`")))?,
     }
-    if let Some(a) = p.get("colors").and_then(Value::as_array) {
-        let c: Option<Vec<[u8; 3]>> = a.iter().map(parse_color).collect();
-        let c = c.ok_or_else(|| bad(CMD, "colors: [\"#rrggbb\" | [r, g, b], …]"))?;
-        if c.is_empty() || c.len() > 256 {
-            return Err(bad(CMD, "a color table has 1 to 256 entries"));
-        }
-        table.colors = c;
+    let mut ignored = 0;
+    if let Some(path) = p.get("load").and_then(Value::as_str).filter(|l| !l.trim().is_empty()) {
+        let t = crate::palette_file::load(s, CMD, path)?;
+        table.colors = t.colors;
+        table.transparent = t.transparent;
+        ignored = t.ignored;
+    }
+    if let Some(v) = p.get("colors") {
+        table.colors = parse_colors(CMD, v, "colors")?;
     }
     if let Some(e) = p.get("entries").and_then(Value::as_object) {
         for (k, v) in e {
@@ -284,7 +343,20 @@ fn color_table(s: &mut Session, p: &Value) -> Result<Value> {
         Some(v) => table.transparent = v.as_u64().filter(|&i| (i as usize) < table.colors.len()).map(|i| i as u8).or(table.transparent),
         None => {}
     }
-    let report = |t: &ColorTable| json!({"colors": t.colors.iter().map(|c| hex(*c)).collect::<Vec<_>>(), "transparent": t.transparent});
+    // A loaded or edited table is what Indexed Color › Previous offers next.
+    if table != cur || p.get("load").is_some() {
+        s.custom_palette = Some(table.colors.clone());
+    }
+    if let Some(path) = p.get("save").and_then(Value::as_str).filter(|v| !v.trim().is_empty()) {
+        crate::palette_file::save(CMD, path, &table.colors, table.transparent)?;
+    }
+    let report = |t: &ColorTable| {
+        let mut r = json!({"colors": t.colors.iter().map(|c| hex(*c)).collect::<Vec<_>>(), "transparent": t.transparent});
+        if ignored > 0 {
+            r["ignored"] = json!(ignored);
+        }
+        r
+    };
     if table == cur {
         return Ok(report(&cur));
     }
@@ -431,7 +503,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "image.mode.indexedColor",
             "Indexed Color…",
             ["Image", "Mode"],
-            r##"{"palette":"selective|perceptual|adaptive|exact|systemMac|systemWindows|web|uniform"="selective","colors":2..256=256,"forced":"blackWhite|none|primaries|web"="blackWhite","transparency":bool=true,"dither":"diffusion|none|pattern|noise"="diffusion","amount":0..100=75} (flattens)"##,
+            r##"{"palette":"selective|perceptual|adaptive|exact|systemMac|systemWindows|web|uniform|custom|previous"="selective","colors":2..256=256,"forced":"blackWhite|none|primaries|web"="blackWhite","transparency":bool=true,"dither":"diffusion|none|pattern|noise"="diffusion","table":json,"amount":0..100=75} (flattens; custom takes `table` (["#rrggbb", …]) or `load` (an .act, .aco or .ase file), previous reuses the last custom palette, `save` writes the palette to an .act, .aco or .ase file)"##,
             |s| mode_is(
                 s,
                 &[ColorMode::Rgb, ColorMode::Grayscale, ColorMode::Indexed, ColorMode::Duotone, ColorMode::Cmyk, ColorMode::Lab],
@@ -443,7 +515,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "image.mode.colorTable",
             "Color Table…",
             ["Image", "Mode"],
-            r##"{"table":"custom|blackBody|grayscale|spectrum|systemMac|systemWindows|web"="custom","colors":json,"entries":json,"transparent":json} (colors: ["#rrggbb", …]; entries: {"index": "#rrggbb"}; transparent: index|null)"##,
+            r##"{"table":"custom|blackBody|grayscale|spectrum|systemMac|systemWindows|web"="custom","colors":json,"entries":json,"transparent":json} (colors: ["#rrggbb", …]; entries: {"index": "#rrggbb"}; transparent: index|null; `load` reads an .act, .aco or .ase file, `save` writes one)"##,
             |s| mode_is(s, &[ColorMode::Indexed], "Color Table needs an Indexed Color image"),
             color_table
         ),

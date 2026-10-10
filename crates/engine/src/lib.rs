@@ -60,6 +60,7 @@ pub mod mode_cmds;
 pub mod multichannel_cmds;
 pub mod notes_cmds;
 pub mod paint_cmds;
+pub mod palette_file;
 mod path_edit_cmds;
 pub mod pattern_cmds;
 pub mod photo_cmds;
@@ -304,6 +305,8 @@ pub struct Session {
     /// File menu state: Lock Slices, Image Assets, last Print / Save for Web settings, script
     /// event log (see `automate_cmds`).
     pub file_menu: automate_cmds::FileMenuState,
+    /// Image › Mode › Indexed Color › Previous: the last custom palette used or loaded.
+    pub custom_palette: Option<Vec<[u8; 3]>>,
     /// Persistent brush preset store (desktop only; `None` keeps presets session-only, as in
     /// headless and test sessions). See `preset_store`. The same store holds the Actions list.
     pub preset_store: Option<preset_store::PresetStore>,

@@ -59,6 +59,10 @@ pub fn parse_spec(spec: &str) -> Vec<Param> {
                 ']' | '}' => depth -= 1,
                 _ => {}
             }
+            // The closing brace of the spec ends it; what follows is prose for agents.
+            if depth < 0 {
+                break;
+            }
         }
         if ch == ',' && !in_str && depth == 0 {
             parts.push(std::mem::take(&mut cur));
@@ -167,6 +171,11 @@ pub fn has_dialog(command: &str) -> bool {
 }
 
 pub fn open(app: &mut PhotocraftApp, command: &str) -> Option<u64> {
+    if command == "image.mode.colorTable"
+        && let Ok(id) = crate::color_table_ui::open(app)
+    {
+        return Some(id);
+    }
     let spec = photocraft_engine::commands::find(command)?;
     let mut fields = Map::new();
     fields.insert("__command".into(), json!(command));
@@ -278,7 +287,12 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
             None => return,
         },
     };
+    let custom_palette = cmd == "image.mode.indexedColor" && matches!(f.get("palette").and_then(Value::as_str), Some("custom" | "previous"));
     for p in parse_spec(&spec) {
+        // A custom palette defines its own colours; the count and forced colours don't apply.
+        if custom_palette && matches!(p.key.as_str(), "colors" | "forced") {
+            continue;
+        }
         match p.kind {
             Kind::Range { min, max, default } => {
                 let mut v = f.get(&p.key).and_then(Value::as_f64).unwrap_or(default as f64) as f32;
@@ -316,7 +330,13 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
                     let mut cur = f.get(&p.key).and_then(Value::as_str).unwrap_or(&options[0]).to_string();
                     let labels: Vec<String> = options.iter().map(|o| choice_label(o)).collect();
                     let opts: Vec<(String, &str)> = options.iter().cloned().zip(labels.iter().map(String::as_str)).collect();
+                    let was = f.get(&p.key).and_then(Value::as_str).map(str::to_string);
                     crate::widgets::dropdown(ui, &format!("flt-{cmd}-{}", p.key), &mut cur, &opts, 170.0);
+                    // Choosing Custom opens the Color Table editor (see color_table_ui).
+                    if cmd == "image.mode.indexedColor" && p.key == "palette" && cur == "custom" && was.as_deref().is_some_and(|w| w != "custom") {
+                        f.insert("__palette_before".into(), json!(was));
+                        f.insert("__open_table".into(), json!(true));
+                    }
                     f.insert(p.key.clone(), json!(cur));
                 });
             }
@@ -379,6 +399,12 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
                 f.insert(p.key, json!(v.round() as i64));
             }
         }
+    }
+    if custom_palette
+        && f.get("palette").and_then(Value::as_str) == Some("custom")
+        && crate::widgets::secondary_button(ui, tl!("Color Table…"), 150.0).clicked()
+    {
+        f.insert("__open_table".into(), json!(true));
     }
     // Read-only context the dialog opener supplies (e.g. the monitor profile in use).
     if let Some(note) = f.get("__note").and_then(Value::as_str) {

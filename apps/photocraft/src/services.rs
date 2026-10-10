@@ -65,8 +65,11 @@ fn show_file_dialog(request: FileDialogRequest, parent: Option<&eframe::Frame>, 
         dialog = dialog.set_parent(parent);
     }
     let answer: Pin<Box<dyn Future<Output = Option<FileDialogAnswer>> + Send>> = match request {
-        FileDialogRequest::Open { multiple } => {
-            let dialog = dialog.add_filter("All Formats", OPEN_EXTS).add_filter("PhotoCraft", &["pcraft"]);
+        FileDialogRequest::Open { multiple, only } => {
+            let dialog = match only {
+                Some((name, exts)) => dialog.add_filter(name, exts),
+                None => dialog.add_filter("All Formats", OPEN_EXTS).add_filter("PhotoCraft", &["pcraft"]),
+            };
             if multiple {
                 let picked = dialog.pick_files();
                 Box::pin(async move { picked.await.map(|files| FileDialogAnswer::Paths(files.iter().map(path_of).collect())) })
